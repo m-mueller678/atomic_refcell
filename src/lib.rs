@@ -50,6 +50,7 @@ use core::fmt;
 use core::fmt::{Debug, Display};
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
+use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic;
 use core::sync::atomic::AtomicUsize;
@@ -60,7 +61,7 @@ extern crate serde;
 use serde::{Deserialize, Serialize};
 
 /// A threadsafe analogue to RefCell.
-pub struct AtomicRefCell<T: ?Sized> {
+pub struct AtomicRefCell<T: ?Sized, const PINNED: bool = false> {
     borrow: AtomicUsize,
     value: UnsafeCell<T>,
 }
@@ -117,7 +118,7 @@ impl<T> AtomicRefCell<T> {
     }
 }
 
-impl<T: ?Sized> AtomicRefCell<T> {
+impl<T: ?Sized, const PINNED: bool> AtomicRefCell<T, PINNED> {
     /// Immutably borrows the wrapped value.
     #[inline]
     pub fn borrow(&self) -> AtomicRef<T> {
@@ -143,33 +144,6 @@ impl<T: ?Sized> AtomicRefCell<T> {
         }
     }
 
-    /// Mutably borrows the wrapped value.
-    #[inline]
-    pub fn borrow_mut(&self) -> AtomicRefMut<T> {
-        match AtomicBorrowRefMut::try_new(&self.borrow) {
-            Ok(borrow) => AtomicRefMut {
-                value: unsafe { NonNull::new_unchecked(self.value.get()) },
-                borrow,
-                marker: PhantomData,
-            },
-            Err(s) => panic!("{}", s),
-        }
-    }
-
-    /// Attempts to mutably borrow the wrapped value, but instead of panicking
-    /// on a failed borrow, returns `Err`.
-    #[inline]
-    pub fn try_borrow_mut(&self) -> Result<AtomicRefMut<T>, BorrowMutError> {
-        match AtomicBorrowRefMut::try_new(&self.borrow) {
-            Ok(borrow) => Ok(AtomicRefMut {
-                value: unsafe { NonNull::new_unchecked(self.value.get()) },
-                borrow,
-                marker: PhantomData,
-            }),
-            Err(_) => Err(BorrowMutError { _private: () }),
-        }
-    }
-
     /// Returns a raw pointer to the underlying data in this cell.
     ///
     /// External synchronization is needed to avoid data races when dereferencing
@@ -187,6 +161,65 @@ impl<T: ?Sized> AtomicRefCell<T> {
     pub fn get_mut(&mut self) -> &mut T {
         debug_assert!(self.borrow.load(atomic::Ordering::Acquire) == 0);
         unsafe { &mut *self.value.get() }
+    }
+}
+
+impl<'b, T: ?Sized, const PINNED: bool> AtomicRefMut<'b, T, PINNED> {
+    /// Common helper function used by mutable accessors.
+    fn try_new(borrow: &'b AtomicUsize, value: *mut T) -> Result<Self, &'static str> {
+        AtomicBorrowRefMut::try_new(&borrow).map(|borrow| AtomicRefMut {
+            value: unsafe { NonNull::new_unchecked(value) },
+            borrow,
+            marker: PhantomData,
+        })
+    }
+}
+
+impl<T: ?Sized> AtomicRefCell<T, false> {
+    /// Mutably borrows the wrapped value.
+    #[inline]
+    pub fn borrow_mut(&self) -> AtomicRefMut<T> {
+        match AtomicRefMut::try_new(&self.borrow, self.value.get()) {
+            Ok(x) => x,
+            Err(s) => panic!("{}", s),
+        }
+    }
+
+    /// Attempts to mutably borrow the wrapped value, but instead of panicking
+    /// on a failed borrow, returns `Err`.
+    #[inline]
+    pub fn try_borrow_mut(&self) -> Result<AtomicRefMut<T>, BorrowMutError> {
+        AtomicRefMut::try_new(&self.borrow, self.value.get())
+            .map_err(|_| BorrowMutError { _private: () })
+    }
+}
+
+impl<T: ?Sized> AtomicRefCell<T, true> {
+    /// Mutably borrows the pinned wrapped value.
+    #[inline]
+    pub fn borrow_pin_mut(self: Pin<&Self>) -> AtomicRefMut<T, true> {
+        match AtomicRefMut::<T, true>::try_new(&self.get_ref().borrow, self.value.get()) {
+            Ok(x) => x,
+            Err(s) => panic!("{}", s),
+        }
+    }
+
+    /// Attempts to mutably borrow the pinned wrapped value, but instead of panicking
+    /// on a failed borrow, returns `Err`.
+    #[inline]
+    pub fn try_borrow_mut(self: Pin<&Self>) -> Result<AtomicRefMut<T, true>, BorrowMutError> {
+        AtomicRefMut::<T, true>::try_new(&self.get_ref().borrow, self.value.get())
+            .map_err(|_| BorrowMutError { _private: () })
+    }
+
+    /// Returns a pinned mutable reference to the wrapped value.
+    ///
+    /// No runtime checks take place (unless debug assertions are enabled)
+    /// because this call borrows `AtomicRefCell` mutably at compile-time.
+    #[inline]
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut T> {
+        debug_assert!(self.borrow.load(atomic::Ordering::Acquire) == 0);
+        unsafe { Pin::new_unchecked(&mut *self.value.get()) }
     }
 }
 
@@ -315,8 +348,8 @@ impl<'b> AtomicBorrowRefMut<'b> {
     }
 }
 
-unsafe impl<T: ?Sized + Send> Send for AtomicRefCell<T> {}
-unsafe impl<T: ?Sized + Send + Sync> Sync for AtomicRefCell<T> {}
+unsafe impl<T: ?Sized + Send, const PINNED: bool> Send for AtomicRefCell<T, PINNED> {}
+unsafe impl<T: ?Sized + Send + Sync, const PINNED: bool> Sync for AtomicRefCell<T, PINNED> {}
 
 //
 // End of core synchronization logic. No tricky thread stuff allowed below
@@ -462,7 +495,7 @@ impl<'b, T: ?Sized> AtomicRefMut<'b, T> {
 }
 
 /// A wrapper type for a mutably borrowed value from an `AtomicRefCell<T>`.
-pub struct AtomicRefMut<'b, T: ?Sized + 'b> {
+pub struct AtomicRefMut<'b, T: ?Sized + 'b, const PINNED: bool = false> {
     value: NonNull<T>,
     borrow: AtomicBorrowRefMut<'b>,
     // `NonNull` is covariant over `T`, but this is used in place of a mutable
@@ -472,10 +505,16 @@ pub struct AtomicRefMut<'b, T: ?Sized + 'b> {
 
 // SAFETY: `AtomicRefMut<'_, T> acts as a mutable reference.
 // `AtomicBorrowRefMut` is a reference to an atomic.
-unsafe impl<'b, T: ?Sized> Sync for AtomicRefMut<'b, T> where for<'a> &'a mut T: Sync {}
-unsafe impl<'b, T: ?Sized> Send for AtomicRefMut<'b, T> where for<'a> &'a mut T: Send {}
+unsafe impl<'b, T: ?Sized, const PINNED: bool> Sync for AtomicRefMut<'b, T, PINNED> where
+    for<'a> &'a mut T: Sync
+{
+}
+unsafe impl<'b, T: ?Sized, const PINNED: bool> Send for AtomicRefMut<'b, T, PINNED> where
+    for<'a> &'a mut T: Send
+{
+}
 
-impl<'b, T: ?Sized> Deref for AtomicRefMut<'b, T> {
+impl<'b, T: ?Sized, const PINNED: bool> Deref for AtomicRefMut<'b, T, PINNED> {
     type Target = T;
 
     #[inline]
@@ -493,22 +532,36 @@ impl<'b, T: ?Sized> DerefMut for AtomicRefMut<'b, T> {
     }
 }
 
+impl<T: ?Sized> AtomicRefMut<'_, T, true> {
+    /// Get mutable access to the pinned contents.
+    #[inline]
+    pub fn get_pin_mut(&mut self) -> Pin<&mut T> {
+        // SAFETY: We hold an exclusive borrow of the value.
+        // The AtomicRefMut was created from a pinned reference to the RefCell,
+        // which does not allow mutable unpinned access to the wrapped value.
+        unsafe { Pin::new_unchecked(self.value.as_mut()) }
+    }
+}
+
 impl<'b, T: ?Sized + Debug + 'b> Debug for AtomicRef<'b, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         <T as Debug>::fmt(self, f)
     }
 }
 
-impl<'b, T: ?Sized + Debug + 'b> Debug for AtomicRefMut<'b, T> {
+impl<'b, T: ?Sized + Debug + 'b, const PINNED: bool> Debug for AtomicRefMut<'b, T, PINNED> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         <T as Debug>::fmt(self, f)
     }
 }
 
-impl<T: ?Sized + Debug> Debug for AtomicRefCell<T>  {
+impl<T: ?Sized + Debug, const PINNED: bool> Debug for AtomicRefCell<T, PINNED> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.try_borrow() {
-            Ok(borrow) => f.debug_struct("AtomicRefCell").field("value", &borrow).finish(),
+            Ok(borrow) => f
+                .debug_struct("AtomicRefCell")
+                .field("value", &borrow)
+                .finish(),
             Err(_) => {
                 // The RefCell is mutably borrowed so we can't look at its value
                 // here. Show a placeholder instead.
@@ -520,14 +573,16 @@ impl<T: ?Sized + Debug> Debug for AtomicRefCell<T>  {
                     }
                 }
 
-                f.debug_struct("AtomicRefCell").field("value", &BorrowedPlaceholder).finish()
+                f.debug_struct("AtomicRefCell")
+                    .field("value", &BorrowedPlaceholder)
+                    .finish()
             }
         }
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for AtomicRefCell<T> {
+impl<'de, T: Deserialize<'de>, const PINNED: bool> Deserialize<'de> for AtomicRefCell<T, PINNED> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -537,7 +592,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for AtomicRefCell<T> {
 }
 
 #[cfg(feature = "serde")]
-impl<T: Serialize> Serialize for AtomicRefCell<T> {
+impl<T: Serialize, const PINNED: bool> Serialize for AtomicRefCell<T, PINNED> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,

@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use atomic_refcell::AtomicRefCell;
+use atomic_pincell::AtomicRefCell;
 
 fn spawn<Fut>(_future: Fut)
 where

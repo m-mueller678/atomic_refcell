@@ -1,9 +1,9 @@
-extern crate atomic_refcell;
+extern crate atomic_pincell;
 
 #[cfg(feature = "serde")]
 extern crate serde;
 
-use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
+use atomic_pincell::{AtomicRef, AtomicRefCell, AtomicRefMut};
 
 #[derive(Debug)]
 struct Foo {

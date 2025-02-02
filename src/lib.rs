@@ -103,11 +103,8 @@ impl Display for BorrowMutError {
 impl<T> AtomicRefCell<T> {
     /// Creates a new `AtomicRefCell` containing `value`.
     #[inline]
-    pub const fn new(value: T) -> AtomicRefCell<T> {
-        AtomicRefCell {
-            borrow: AtomicUsize::new(0),
-            value: UnsafeCell::new(value),
-        }
+    pub const fn new(value: T) -> Self {
+        Self::new_maybe_pinned(value)
     }
 
     /// Consumes the `AtomicRefCell`, returning the wrapped value.
@@ -115,6 +112,25 @@ impl<T> AtomicRefCell<T> {
     pub fn into_inner(self) -> T {
         debug_assert!(self.borrow.load(atomic::Ordering::Acquire) == 0);
         self.value.into_inner()
+    }
+}
+
+impl<T> AtomicRefCell<T, false> {
+    /// Creates a new `AtomicRefCell` containing `value`.
+    #[inline]
+    pub const fn new_pinned(value: T) -> Self {
+        Self::new_maybe_pinned(value)
+    }
+}
+
+impl<T, const PINNED: bool> AtomicRefCell<T, PINNED> {
+    /// Creates a new `AtomicRefCell` containing `value`.
+    #[inline]
+    pub const fn new_maybe_pinned(value: T) -> Self {
+        AtomicRefCell {
+            borrow: AtomicUsize::new(0),
+            value: UnsafeCell::new(value),
+        }
     }
 }
 
@@ -356,46 +372,46 @@ unsafe impl<T: ?Sized + Send + Sync, const PINNED: bool> Sync for AtomicRefCell<
 // this point.
 //
 
-impl<T: Clone> Clone for AtomicRefCell<T> {
+impl<T: Clone, const PINNED: bool> Clone for AtomicRefCell<T, PINNED> {
     #[inline]
-    fn clone(&self) -> AtomicRefCell<T> {
-        AtomicRefCell::new(self.borrow().clone())
+    fn clone(&self) -> AtomicRefCell<T, PINNED> {
+        Self::new_maybe_pinned(self.borrow().clone())
     }
 }
 
-impl<T: Default> Default for AtomicRefCell<T> {
+impl<T: Default, const PINNED: bool> Default for AtomicRefCell<T, PINNED> {
     #[inline]
-    fn default() -> AtomicRefCell<T> {
-        AtomicRefCell::new(Default::default())
+    fn default() -> Self {
+        AtomicRefCell::new_maybe_pinned(Default::default())
     }
 }
 
-impl<T: ?Sized + PartialEq> PartialEq for AtomicRefCell<T> {
+impl<T: ?Sized + PartialEq, const PINNED: bool> PartialEq for AtomicRefCell<T, PINNED> {
     #[inline]
-    fn eq(&self, other: &AtomicRefCell<T>) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         *self.borrow() == *other.borrow()
     }
 }
 
-impl<T: ?Sized + Eq> Eq for AtomicRefCell<T> {}
+impl<T: ?Sized + Eq, const PINNED: bool> Eq for AtomicRefCell<T, PINNED> {}
 
-impl<T: ?Sized + PartialOrd> PartialOrd for AtomicRefCell<T> {
+impl<T: ?Sized + PartialOrd, const PINNED: bool> PartialOrd for AtomicRefCell<T, PINNED> {
     #[inline]
-    fn partial_cmp(&self, other: &AtomicRefCell<T>) -> Option<cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         self.borrow().partial_cmp(&*other.borrow())
     }
 }
 
-impl<T: ?Sized + Ord> Ord for AtomicRefCell<T> {
+impl<T: ?Sized + Ord, const PINNED: bool> Ord for AtomicRefCell<T, PINNED> {
     #[inline]
-    fn cmp(&self, other: &AtomicRefCell<T>) -> cmp::Ordering {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.borrow().cmp(&*other.borrow())
     }
 }
 
-impl<T> From<T> for AtomicRefCell<T> {
-    fn from(t: T) -> AtomicRefCell<T> {
-        AtomicRefCell::new(t)
+impl<T, const PINNED: bool> From<T> for AtomicRefCell<T, PINNED> {
+    fn from(t: T) -> Self {
+        AtomicRefCell::new_maybe_pinned(t)
     }
 }
 

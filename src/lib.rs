@@ -115,7 +115,7 @@ impl<T> AtomicRefCell<T> {
     }
 }
 
-impl<T> AtomicRefCell<T, false> {
+impl<T> AtomicRefCell<T, true> {
     /// Creates a new `AtomicRefCell` containing `value`.
     #[inline]
     pub const fn new_pinned(value: T) -> Self {

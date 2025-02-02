@@ -1,6 +1,6 @@
 [package]
 name = "atomic_pincell"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["m-mueller678","Bobby Holley <bobbyholley@gmail.com>"]
 description = "Threadsafe pinnable RefCell"
 license = "Apache-2.0/MIT"
